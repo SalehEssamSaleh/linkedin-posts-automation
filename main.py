@@ -485,7 +485,7 @@ def append_seen_urls(spreadsheet, entries: list):
 
 
 def write_results(spreadsheet, rows: list):
-    today_title = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_title = datetime.now(timezone.utc).strftime("%d - %b - %Y")
     ws = get_or_create_tab(spreadsheet, today_title, RESULTS_HEADERS, wrap_columns=RESULTS_WRAP_COLUMNS)
     if rows:
         ws.append_rows(rows)
