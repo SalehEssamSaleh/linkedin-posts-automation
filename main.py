@@ -55,6 +55,7 @@ from config import (
     MAX_RETRIES,
     BACKOFF_BASE_SECONDS,
     TIME_BUDGET_SECONDS,
+    CONSECUTIVE_429_LIMIT,
     ALERT_RSS_FEEDS,
     SEARXNG_INSTANCE_URL,
     MOJEEK_API_KEY,
@@ -564,6 +565,8 @@ def main():
     log.info("Starting run over %d keywords", len(KEYWORDS))
     run_deadline = time.monotonic() + TIME_BUDGET_SECONDS
     stopped_early = False
+    consecutive_429 = 0
+    circuit_tripped = False
 
     for keyword in KEYWORDS:
         if time.monotonic() > run_deadline:
@@ -602,9 +605,28 @@ def main():
 
             page, reason = fetch_post_data(url)
             polite_sleep()
+
             if page is None:
                 tally(reason or "unknown_fetch_failure")
+                if reason and reason.startswith("http_429"):
+                    consecutive_429 += 1
+                    if consecutive_429 >= CONSECUTIVE_429_LIMIT:
+                        log.error(
+                            "Hit %d consecutive HTTP 429s from LinkedIn across different URLs — "
+                            "this looks like the whole connection is currently rate-limited/blocked "
+                            "by LinkedIn, not just individual requests being too close together. "
+                            "Stopping further fetches for the rest of this run instead of burning "
+                            "the time budget for no results. This will likely need either a longer "
+                            "gap between runs, or a non-shared IP (e.g. self-hosted runner) to fix.",
+                            consecutive_429,
+                        )
+                        circuit_tripped = True
+                        break
+                else:
+                    consecutive_429 = 0
                 continue
+
+            consecutive_429 = 0
 
             content = extract_body_text(page["soup"])
             date_published = extract_published_date(page["soup"])
@@ -629,7 +651,7 @@ def main():
             newly_seen.append((url, date_published))
             record_stat(cand["source"], kind)
 
-        if stopped_early:
+        if stopped_early or circuit_tripped:
             break
 
         polite_sleep()
@@ -646,6 +668,9 @@ def main():
         log.info("  %-40s %d", reason, count)
     if stopped_early:
         log.warning("This run stopped early due to the time budget — some keywords may not have been processed.")
+    if circuit_tripped:
+        log.warning("This run stopped early due to repeated HTTP 429s from LinkedIn — "
+                     "see the error above. Some keywords were not processed this run.")
 
 
 if __name__ == "__main__":
