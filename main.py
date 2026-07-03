@@ -44,11 +44,26 @@ SHEET_HEADERS = [
 SEEN_TAB_NAME = "SeenURLs"
 
 POST_PATTERN = re.compile(r"linkedin\.com/(posts|feed/update)/", re.I)
-ARTICLE_PATTERN = re.compile(r"linkedin\.com/pulse/", re.I)
+# /pulse/topics/... are topic hub/listing pages, not real articles — exclude them
+ARTICLE_PATTERN = re.compile(r"linkedin\.com/pulse/(?!topics/)", re.I)
 
 RELATIVE_EN = re.compile(r"(\d+)\s*(minute|min|hour|hr|day|week)s?\s*ago", re.I)
 RELATIVE_AR = re.compile(r"منذ\s*(\d+)\s*(دقيقة|ساعة|يوم|أسبوع)")
 AR_UNIT_MAP = {"دقيقة": "minute", "ساعة": "hour", "يوم": "day", "أسبوع": "week"}
+
+# Absolute written-out dates like "July 18, 2022" or "March 10, 2024" — these
+# show up constantly in LinkedIn snippets and were being missed entirely
+# before, letting years-old content slip through as "unverified" instead of
+# correctly getting rejected as too old.
+ABSOLUTE_EN = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|"
+    r"October|November|December)\s+(\d{1,2}),?\s+(\d{4})\b",
+    re.I,
+)
+MONTH_NUMBERS = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+}
 
 START_TIME = time.monotonic()
 
@@ -84,31 +99,52 @@ def classify_url(url):
 
 
 def parse_relative_date(text):
-    """Best-effort extraction of a publish date from a search snippet."""
+    """Best-effort extraction of a publish date from a search snippet —
+    tries relative phrases ('3 days ago') first, then absolute written-out
+    dates ('July 18, 2022'), since both show up constantly in real snippets."""
     now = dt.datetime.now(dt.timezone.utc)
 
     m = RELATIVE_EN.search(text)
     if m:
         amount, unit = int(m.group(1)), m.group(2).lower()
-    else:
-        m = RELATIVE_AR.search(text)
-        if m:
-            amount, unit = int(m.group(1)), AR_UNIT_MAP[m.group(2)]
+        if unit.startswith("min"):
+            delta = dt.timedelta(minutes=amount)
+        elif unit.startswith(("hour", "hr")):
+            delta = dt.timedelta(hours=amount)
+        elif unit.startswith("day"):
+            delta = dt.timedelta(days=amount)
+        elif unit.startswith("week"):
+            delta = dt.timedelta(weeks=amount)
         else:
             return None
+        return now - delta
 
-    if unit.startswith("min"):
-        delta = dt.timedelta(minutes=amount)
-    elif unit.startswith(("hour", "hr")):
-        delta = dt.timedelta(hours=amount)
-    elif unit.startswith("day"):
-        delta = dt.timedelta(days=amount)
-    elif unit.startswith("week"):
-        delta = dt.timedelta(weeks=amount)
-    else:
-        return None
+    m = RELATIVE_AR.search(text)
+    if m:
+        amount, unit = int(m.group(1)), AR_UNIT_MAP[m.group(2)]
+        if unit.startswith("min"):
+            delta = dt.timedelta(minutes=amount)
+        elif unit.startswith(("hour", "hr")):
+            delta = dt.timedelta(hours=amount)
+        elif unit.startswith("day"):
+            delta = dt.timedelta(days=amount)
+        elif unit.startswith("week"):
+            delta = dt.timedelta(weeks=amount)
+        else:
+            return None
+        return now - delta
 
-    return now - delta
+    m = ABSOLUTE_EN.search(text)
+    if m:
+        month_name, day, year = m.group(1).lower(), int(m.group(2)), int(m.group(3))
+        month_num = MONTH_NUMBERS.get(month_name)
+        if month_num:
+            try:
+                return dt.datetime(year, month_num, day, tzinfo=dt.timezone.utc)
+            except ValueError:
+                return None
+
+    return None
 
 
 def parse_iso_date(date_str):
@@ -312,7 +348,8 @@ def run():
 
     new_seen_rows = []
     consecutive_429 = 0
-    stats = {"found": 0, "added": 0, "duplicate": 0, "not_post_or_article": 0, "too_old": 0}
+    stats = {"found": 0, "added": 0, "duplicate": 0, "not_post_or_article": 0,
+              "too_old": 0, "unverifiable_date": 0}
 
     for keyword in config.KEYWORDS:
         if time_budget_exceeded():
@@ -355,18 +392,19 @@ def run():
                 date_source = "estimated" if published else "unknown"
 
             within = is_within_window(published)
-            if within is False:
-                stats["too_old"] += 1
+            if within is not True:
+                # Either genuinely too old, or we couldn't determine a date
+                # at all. Both get dropped now — precision over volume: a
+                # result we can't verify as recent isn't worth keeping.
+                if within is False:
+                    stats["too_old"] += 1
+                else:
+                    stats["unverifiable_date"] += 1
                 continue
-            # within is True -> keep. within is None (date unknown) -> keep
-            # but mark it clearly as unverified rather than silently guessing.
 
-            if date_source == "verified":
-                date_str = published.strftime("%Y-%m-%d")
-            elif date_source == "estimated":
-                date_str = f"{published.strftime('%Y-%m-%d')} (estimated)"
-            else:
-                date_str = "Unverified"
+            date_str = published.strftime("%Y-%m-%d")
+            if date_source == "estimated":
+                date_str += " (estimated)"
 
             language = detect_language(content) if content else "Unknown"
             reply = generate_reply(model, content, language)
