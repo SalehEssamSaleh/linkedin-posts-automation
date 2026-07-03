@@ -2,8 +2,8 @@ name: Daily LinkedIn Keyword Search
 
 on:
   schedule:
-    # 05:30 UTC daily = 08:30 Riyadh (AST, UTC+3, no DST)
-    - cron: '30 5 * * *'
+    # 05:30 UTC every Sunday = 08:30 Riyadh (AST, UTC+3, no DST)
+    - cron: '30 5 * * 0'
   workflow_dispatch: {}
 
 jobs:
