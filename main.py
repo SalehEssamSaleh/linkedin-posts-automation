@@ -54,6 +54,7 @@ from config import (
     MAX_DELAY_SECONDS,
     MAX_RETRIES,
     BACKOFF_BASE_SECONDS,
+    TIME_BUDGET_SECONDS,
     ALERT_RSS_FEEDS,
     SEARXNG_INSTANCE_URL,
     MOJEEK_API_KEY,
@@ -349,6 +350,37 @@ FALLBACK_REPLIES = {
 }
 
 
+_GEMINI_MODEL_NAME = None  # resolved once per run, cached
+
+
+def _resolve_gemini_model() -> str:
+    """Ask the Gemini API which models this key can actually use, instead of
+    hardcoding a model name that Google can rename/retire at any time
+    (this is exactly what broke the previous 'gemini-1.5-flash' run)."""
+    global _GEMINI_MODEL_NAME
+    if _GEMINI_MODEL_NAME:
+        return _GEMINI_MODEL_NAME
+
+    genai.configure(api_key=GEMINI_API_KEY)
+    try:
+        models = list(genai.list_models())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not list Gemini models (%s) — guessing 'gemini-flash-latest'", exc)
+        _GEMINI_MODEL_NAME = "gemini-flash-latest"
+        return _GEMINI_MODEL_NAME
+
+    usable = [m for m in models if "generateContent" in getattr(m, "supported_generation_methods", [])]
+    if not usable:
+        raise RuntimeError("No Gemini model on this API key supports generateContent")
+
+    # prefer a fast/cheap "flash" model if one is available, else take the first usable one
+    flash = [m for m in usable if "flash" in m.name.lower()]
+    chosen = (flash[0] if flash else usable[0]).name
+    log.info("Resolved Gemini model for this run: %s", chosen)
+    _GEMINI_MODEL_NAME = chosen
+    return _GEMINI_MODEL_NAME
+
+
 def generate_reply(content: str, language: str) -> str:
     if not GEMINI_API_KEY:
         return FALLBACK_REPLIES.get(language, FALLBACK_REPLIES["unknown"])
@@ -367,8 +399,8 @@ def generate_reply(content: str, language: str) -> str:
     )
 
     def _run():
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model_name = _resolve_gemini_model()
+        model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt)
         return response.text.strip()
 
@@ -455,8 +487,16 @@ def main():
     newly_seen = []
 
     log.info("Starting run over %d keywords", len(KEYWORDS))
+    run_deadline = time.monotonic() + TIME_BUDGET_SECONDS
+    stopped_early = False
 
     for keyword in KEYWORDS:
+        if time.monotonic() > run_deadline:
+            log.warning("Time budget exhausted — stopping early before '%s'. "
+                        "Remaining keywords will be picked up on the next run.", keyword)
+            stopped_early = True
+            break
+
         log.info("== Keyword: %s ==", keyword)
         candidates = []
         candidates += search_ddg(keyword, raw_log)
@@ -467,6 +507,11 @@ def main():
         # de-dup within this keyword's candidate set, then against history
         seen_this_keyword = set()
         for cand in candidates:
+            if time.monotonic() > run_deadline:
+                log.warning("Time budget exhausted mid-keyword ('%s') — stopping here.", keyword)
+                stopped_early = True
+                break
+
             url = cand["url"].split("?")[0].rstrip("/")
             if not url or url in seen_this_keyword or url in seen_urls:
                 continue
@@ -498,6 +543,9 @@ def main():
             newly_seen.append(url)
             record_stat(cand["source"], kind)
 
+        if stopped_early:
+            break
+
         polite_sleep()
 
     log.info("Writing %d new rows to today's tab", len(result_rows))
@@ -508,6 +556,8 @@ def main():
 
     log.info("Done. Totals: %s", RUN_STATS["totals"])
     log.info("By source: %s", RUN_STATS["by_source"])
+    if stopped_early:
+        log.warning("This run stopped early due to the time budget — some keywords may not have been processed.")
 
 
 if __name__ == "__main__":
