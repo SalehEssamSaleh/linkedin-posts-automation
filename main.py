@@ -269,33 +269,40 @@ def search_mojeek(keyword: str, raw_log: list):
 # Validation (carried over from the working weekly job)
 # ---------------------------------------------------------------------------
 def fetch_post_data(url: str):
-    """Fetch a candidate URL and return {html, title} if it looks like a
-    real, publicly viewable page — or None if it's broken/behind an authwall."""
+    """Fetch a candidate URL. Returns (page_dict, None) on success, or
+    (None, reason_str) on rejection — the reason is what actually lets us
+    tell 'blocked by LinkedIn authwall' apart from 'timed out' apart from
+    'page genuinely gone', instead of every failure looking identical."""
     def _run():
         return requests.get(url, headers=REQUEST_HEADERS, timeout=15, allow_redirects=True)
 
     resp = with_retry(_run, retries=2, label=f"fetch[{url}]")
     if resp is None:
-        return None
+        return None, "fetch_failed_or_timeout"
 
     if resp.status_code != 200:
-        return None
+        return None, f"http_{resp.status_code}"
 
     final_url = resp.url.lower()
-    if any(hint in final_url for hint in BLOCKED_REDIRECT_HINTS):
-        return None
+    for hint in BLOCKED_REDIRECT_HINTS:
+        if hint in final_url:
+            return None, f"redirected_to_{hint}"
 
     soup = BeautifulSoup(resp.text, "html.parser")
     title = (soup.title.string or "").strip().lower() if soup.title and soup.title.string else ""
-    if any(hint in title for hint in BLOCKED_TITLE_HINTS):
-        return None
+    for hint in BLOCKED_TITLE_HINTS:
+        if hint in title:
+            return None, f"blocked_title_{hint.replace(' ', '_')}"
 
     body_text = soup.get_text(" ", strip=True).lower()
-    if any(hint in body_text for hint in BLOCKED_BODY_HINTS):
-        return None
+    for hint in BLOCKED_BODY_HINTS:
+        if hint in body_text:
+            return None, f"blocked_body_{hint.replace(' ', '_')}"
 
-    return {"html": resp.text, "title": soup.title.string.strip() if soup.title and soup.title.string else "",
+    page = {"html": resp.text,
+            "title": soup.title.string.strip() if soup.title and soup.title.string else "",
             "soup": soup}
+    return page, None
 
 
 def extract_published_date(soup: BeautifulSoup):
@@ -435,8 +442,6 @@ def generate_reply(content: str, language: str) -> str:
 RESULTS_HEADERS = ["Type (Post/Article)", "Keyword Matched", "Content", "Link",
                    "Date Published", "Language", "Suggested Reply"]
 SEEN_HEADERS = ["URL", "Date Published", "First Seen (UTC)"]
-RUNLOG_HEADERS = ["Run (UTC)", "Source", "Posts Found", "Articles Found", "Raw Results"]
-RAWLOG_HEADERS = ["Run (UTC)", "Source", "Keyword", "URL", "Title"]
 
 # Columns (1-indexed) in the daily results tab that hold long free text and
 # should wrap instead of getting silently clipped by neighboring populated
@@ -452,7 +457,7 @@ def get_sheet_client():
     return client.open_by_key(SHEET_ID)
 
 
-def get_or_create_tab(spreadsheet, title, headers, wrap_columns=None):
+def get_or_create_tab(spreadsheet, title, headers, wrap_columns=None, hidden=False):
     try:
         ws = spreadsheet.worksheet(title)
         return ws
@@ -467,11 +472,23 @@ def get_or_create_tab(spreadsheet, title, headers, wrap_columns=None):
                 ws.format(f"{col_letter}:{col_letter}", {"wrapStrategy": "WRAP"})
             except Exception as exc:  # noqa: BLE001 — cosmetic only, never fail the run over this
                 log.warning("Could not set text wrapping on column %s: %s", col_letter, exc)
+    if hidden:
+        try:
+            spreadsheet.batch_update({
+                "requests": [{
+                    "updateSheetProperties": {
+                        "properties": {"sheetId": ws.id, "hidden": True},
+                        "fields": "hidden",
+                    }
+                }]
+            })
+        except Exception as exc:  # noqa: BLE001 — cosmetic only, never fail the run over this
+            log.warning("Could not hide tab '%s': %s", title, exc)
     return ws
 
 
 def load_seen_urls(spreadsheet) -> set:
-    ws = get_or_create_tab(spreadsheet, "SeenURLs", SEEN_HEADERS)
+    ws = get_or_create_tab(spreadsheet, "SeenURLs", SEEN_HEADERS, hidden=True)
     values = ws.get_all_values()[1:]  # skip header
     return {row[0] for row in values if row}
 
@@ -479,7 +496,7 @@ def load_seen_urls(spreadsheet) -> set:
 def append_seen_urls(spreadsheet, entries: list):
     if not entries:
         return
-    ws = get_or_create_tab(spreadsheet, "SeenURLs", SEEN_HEADERS)
+    ws = get_or_create_tab(spreadsheet, "SeenURLs", SEEN_HEADERS, hidden=True)
     now = datetime.now(timezone.utc).isoformat()
     ws.append_rows([[url, date_published, now] for url, date_published in entries])
 
@@ -487,26 +504,6 @@ def append_seen_urls(spreadsheet, entries: list):
 def write_results(spreadsheet, rows: list):
     today_title = datetime.now(timezone.utc).strftime("%d - %b - %Y")
     ws = get_or_create_tab(spreadsheet, today_title, RESULTS_HEADERS, wrap_columns=RESULTS_WRAP_COLUMNS)
-    if rows:
-        ws.append_rows(rows)
-
-
-def write_run_log(spreadsheet, stats: dict):
-    ws = get_or_create_tab(spreadsheet, "RunLog", RUNLOG_HEADERS)
-    now = datetime.now(timezone.utc).isoformat()
-    rows = []
-    for source, counts in stats["by_source"].items():
-        rows.append([now, source, counts.get("post", 0), counts.get("article", 0),
-                     counts.get("raw", 0)])
-    if not rows:
-        rows = [[now, "(no sources returned data)", 0, 0, 0]]
-    ws.append_rows(rows)
-
-
-def write_raw_search_log(spreadsheet, raw_log: list):
-    ws = get_or_create_tab(spreadsheet, "RawSearchLog", RAWLOG_HEADERS)
-    now = datetime.now(timezone.utc).isoformat()
-    rows = [[now, e["source"], e["keyword"], e["url"], e.get("title", "")] for e in raw_log]
     if rows:
         ws.append_rows(rows)
 
@@ -521,6 +518,10 @@ def main():
     result_rows = []
     newly_seen = []
     skipped_stale = 0
+    drop_reasons = {}  # reason -> count, e.g. "redirected_to_authwall" -> 12
+
+    def tally(reason):
+        drop_reasons[reason] = drop_reasons.get(reason, 0) + 1
 
     log.info("Starting run over %d keywords", len(KEYWORDS))
     run_deadline = time.monotonic() + TIME_BUDGET_SECONDS
@@ -549,17 +550,22 @@ def main():
                 break
 
             url = cand["url"].split("?")[0].rstrip("/")
-            if not url or url in seen_this_keyword or url in seen_urls:
+            if not url:
+                continue
+            if url in seen_this_keyword or url in seen_urls:
+                tally("already_seen_or_duplicate")
                 continue
             seen_this_keyword.add(url)
 
             kind = classify_url(url)
             if kind is None:
+                tally("not_a_relevant_linkedin_url")
                 continue
 
-            page = fetch_post_data(url)
+            page, reason = fetch_post_data(url)
             polite_sleep()
             if page is None:
+                tally(reason or "unknown_fetch_failure")
                 continue
 
             content = extract_body_text(page["soup"])
@@ -567,6 +573,7 @@ def main():
 
             if not is_within_search_window(date_published, SEARCH_WINDOW_HOURS):
                 skipped_stale += 1
+                tally("stale_or_unverifiable_date")
                 continue
 
             language = detect_language(content)
@@ -592,12 +599,13 @@ def main():
     log.info("Writing %d new rows to today's tab", len(result_rows))
     write_results(spreadsheet, result_rows)
     append_seen_urls(spreadsheet, newly_seen)
-    write_run_log(spreadsheet, RUN_STATS)
-    write_raw_search_log(spreadsheet, raw_log)
 
     log.info("Done. Totals: %s", RUN_STATS["totals"])
     log.info("By source: %s", RUN_STATS["by_source"])
     log.info("Skipped as stale/unverifiable-date: %d", skipped_stale)
+    log.info("Full drop-reason breakdown (why candidates did NOT make it into the sheet):")
+    for reason, count in sorted(drop_reasons.items(), key=lambda kv: -kv[1]):
+        log.info("  %-40s %d", reason, count)
     if stopped_early:
         log.warning("This run stopped early due to the time budget — some keywords may not have been processed.")
 
