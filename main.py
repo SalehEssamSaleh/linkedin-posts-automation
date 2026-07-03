@@ -270,39 +270,77 @@ def search_mojeek(keyword: str, raw_log: list):
 # ---------------------------------------------------------------------------
 def fetch_post_data(url: str):
     """Fetch a candidate URL. Returns (page_dict, None) on success, or
-    (None, reason_str) on rejection — the reason is what actually lets us
-    tell 'blocked by LinkedIn authwall' apart from 'timed out' apart from
-    'page genuinely gone', instead of every failure looking identical."""
-    def _run():
-        return requests.get(url, headers=REQUEST_HEADERS, timeout=15, allow_redirects=True)
+    (None, reason_str) on rejection.
 
-    resp = with_retry(_run, retries=2, label=f"fetch[{url}]")
-    if resp is None:
-        return None, "fetch_failed_or_timeout"
+    429 (rate limited) and 5xx responses get real, escalating backoff —
+    respecting LinkedIn's own Retry-After header when present — instead of
+    being accepted as a final answer on the first try. This is what was
+    silently losing ~20 results per run before."""
+    last_status = None
 
-    if resp.status_code != 200:
-        return None, f"http_{resp.status_code}"
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.get(url, headers=REQUEST_HEADERS, timeout=15, allow_redirects=True)
+        except Exception as exc:  # noqa: BLE001 — network error, worth retrying
+            wait = BACKOFF_BASE_SECONDS * attempt + random.uniform(0, 2)
+            log.warning("fetch[%s] request error (attempt %d/%d): %s — backing off %.1fs",
+                        url, attempt, MAX_RETRIES, exc, wait)
+            time.sleep(wait)
+            continue
 
-    final_url = resp.url.lower()
-    for hint in BLOCKED_REDIRECT_HINTS:
-        if hint in final_url:
-            return None, f"redirected_to_{hint}"
+        if resp.status_code == 429:
+            last_status = 429
+            retry_after = resp.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    wait = float(retry_after)
+                except ValueError:
+                    wait = BACKOFF_BASE_SECONDS * attempt * 2
+            else:
+                # extra-cautious backoff specifically for rate limiting —
+                # roughly double the normal escalation
+                wait = BACKOFF_BASE_SECONDS * attempt * 2 + random.uniform(0, 3)
+            log.warning("fetch[%s] got 429 (attempt %d/%d) — backing off %.1fs",
+                        url, attempt, MAX_RETRIES, wait)
+            time.sleep(wait)
+            continue
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    title = (soup.title.string or "").strip().lower() if soup.title and soup.title.string else ""
-    for hint in BLOCKED_TITLE_HINTS:
-        if hint in title:
-            return None, f"blocked_title_{hint.replace(' ', '_')}"
+        if resp.status_code >= 500:
+            last_status = resp.status_code
+            wait = BACKOFF_BASE_SECONDS * attempt + random.uniform(0, 2)
+            log.warning("fetch[%s] got %d (attempt %d/%d) — backing off %.1fs",
+                        url, resp.status_code, attempt, MAX_RETRIES, wait)
+            time.sleep(wait)
+            continue
 
-    body_text = soup.get_text(" ", strip=True).lower()
-    for hint in BLOCKED_BODY_HINTS:
-        if hint in body_text:
-            return None, f"blocked_body_{hint.replace(' ', '_')}"
+        if resp.status_code != 200:
+            # a real, non-retryable outcome (404, 403, etc.) — retrying won't help
+            return None, f"http_{resp.status_code}"
 
-    page = {"html": resp.text,
-            "title": soup.title.string.strip() if soup.title and soup.title.string else "",
-            "soup": soup}
-    return page, None
+        final_url = resp.url.lower()
+        for hint in BLOCKED_REDIRECT_HINTS:
+            if hint in final_url:
+                return None, f"redirected_to_{hint}"
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        title = (soup.title.string or "").strip().lower() if soup.title and soup.title.string else ""
+        for hint in BLOCKED_TITLE_HINTS:
+            if hint in title:
+                return None, f"blocked_title_{hint.replace(' ', '_')}"
+
+        body_text = soup.get_text(" ", strip=True).lower()
+        for hint in BLOCKED_BODY_HINTS:
+            if hint in body_text:
+                return None, f"blocked_body_{hint.replace(' ', '_')}"
+
+        page = {"html": resp.text,
+                "title": soup.title.string.strip() if soup.title and soup.title.string else "",
+                "soup": soup}
+        return page, None
+
+    if last_status:
+        return None, f"http_{last_status}_after_retries"
+    return None, "fetch_failed_or_timeout"
 
 
 def extract_published_date(soup: BeautifulSoup):
