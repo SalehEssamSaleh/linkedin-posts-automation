@@ -14,7 +14,6 @@ import os
 KEYWORDS = [
     "UX/UI",
     "تجربة المستخدم",
-]
 
 # ---------------------------------------------------------------------------
 # Search window
@@ -25,8 +24,8 @@ SEARCH_WINDOW_HOURS = 24
 # Rate limiting / retry — daily runs across ~18 keywords hit free search
 # sources much harder than the old weekly job. Be polite.
 # ---------------------------------------------------------------------------
-MIN_DELAY_SECONDS = 4
-MAX_DELAY_SECONDS = 9
+MIN_DELAY_SECONDS = 6
+MAX_DELAY_SECONDS = 13
 MAX_RETRIES = 2
 BACKOFF_BASE_SECONDS = 4
 
