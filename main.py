@@ -311,6 +311,27 @@ def extract_published_date(soup: BeautifulSoup):
     return "Unknown"
 
 
+def is_within_search_window(date_str: str, window_hours: int) -> bool:
+    """True only if date_str parses AND falls within the last window_hours.
+    Unknown/unparseable dates return False — we'd rather under-include than
+    silently let stale or unverifiable content through as "last 24 hours"."""
+    if not date_str or date_str == "Unknown":
+        return False
+    cleaned = date_str.strip()
+    if cleaned.endswith("Z"):
+        cleaned = cleaned[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(cleaned)
+    except ValueError:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - dt
+    # small negative buffer to tolerate minor clock skew (post timestamped
+    # a few minutes "in the future" relative to this machine)
+    return timedelta(minutes=-10) <= age <= timedelta(hours=window_hours)
+
+
 def extract_body_text(soup: BeautifulSoup, limit=500):
     # Best-effort: LinkedIn's markup varies; fall back to og:description / title.
     meta = soup.find("meta", {"property": "og:description"})
@@ -413,9 +434,14 @@ def generate_reply(content: str, language: str) -> str:
 # ---------------------------------------------------------------------------
 RESULTS_HEADERS = ["Type (Post/Article)", "Keyword Matched", "Content", "Link",
                    "Date Published", "Language", "Suggested Reply"]
-SEEN_HEADERS = ["URL", "First Seen (UTC)"]
+SEEN_HEADERS = ["URL", "Date Published", "First Seen (UTC)"]
 RUNLOG_HEADERS = ["Run (UTC)", "Source", "Posts Found", "Articles Found", "Raw Results"]
 RAWLOG_HEADERS = ["Run (UTC)", "Source", "Keyword", "URL", "Title"]
+
+# Columns (1-indexed) in the daily results tab that hold long free text and
+# should wrap instead of getting silently clipped by neighboring populated
+# cells — this is what made Content/Suggested Reply look "missing" before.
+RESULTS_WRAP_COLUMNS = [3, 7]  # Content, Suggested Reply
 
 
 def get_sheet_client():
@@ -426,12 +452,21 @@ def get_sheet_client():
     return client.open_by_key(SHEET_ID)
 
 
-def get_or_create_tab(spreadsheet, title, headers):
+def get_or_create_tab(spreadsheet, title, headers, wrap_columns=None):
     try:
         ws = spreadsheet.worksheet(title)
+        return ws
     except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=title, rows=1000, cols=max(10, len(headers)))
-        ws.append_row(headers)
+        pass
+    ws = spreadsheet.add_worksheet(title=title, rows=1000, cols=max(10, len(headers)))
+    ws.append_row(headers)
+    if wrap_columns:
+        for col in wrap_columns:
+            col_letter = gspread.utils.rowcol_to_a1(1, col).rstrip("0123456789")
+            try:
+                ws.format(f"{col_letter}:{col_letter}", {"wrapStrategy": "WRAP"})
+            except Exception as exc:  # noqa: BLE001 — cosmetic only, never fail the run over this
+                log.warning("Could not set text wrapping on column %s: %s", col_letter, exc)
     return ws
 
 
@@ -441,17 +476,17 @@ def load_seen_urls(spreadsheet) -> set:
     return {row[0] for row in values if row}
 
 
-def append_seen_urls(spreadsheet, urls: list):
-    if not urls:
+def append_seen_urls(spreadsheet, entries: list):
+    if not entries:
         return
     ws = get_or_create_tab(spreadsheet, "SeenURLs", SEEN_HEADERS)
     now = datetime.now(timezone.utc).isoformat()
-    ws.append_rows([[u, now] for u in urls])
+    ws.append_rows([[url, date_published, now] for url, date_published in entries])
 
 
 def write_results(spreadsheet, rows: list):
     today_title = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    ws = get_or_create_tab(spreadsheet, today_title, RESULTS_HEADERS)
+    ws = get_or_create_tab(spreadsheet, today_title, RESULTS_HEADERS, wrap_columns=RESULTS_WRAP_COLUMNS)
     if rows:
         ws.append_rows(rows)
 
@@ -485,6 +520,7 @@ def main():
     raw_log = []
     result_rows = []
     newly_seen = []
+    skipped_stale = 0
 
     log.info("Starting run over %d keywords", len(KEYWORDS))
     run_deadline = time.monotonic() + TIME_BUDGET_SECONDS
@@ -528,6 +564,11 @@ def main():
 
             content = extract_body_text(page["soup"])
             date_published = extract_published_date(page["soup"])
+
+            if not is_within_search_window(date_published, SEARCH_WINDOW_HOURS):
+                skipped_stale += 1
+                continue
+
             language = detect_language(content)
             reply = generate_reply(content, language)
 
@@ -540,7 +581,7 @@ def main():
                 language,
                 reply,
             ])
-            newly_seen.append(url)
+            newly_seen.append((url, date_published))
             record_stat(cand["source"], kind)
 
         if stopped_early:
@@ -556,6 +597,7 @@ def main():
 
     log.info("Done. Totals: %s", RUN_STATS["totals"])
     log.info("By source: %s", RUN_STATS["by_source"])
+    log.info("Skipped as stale/unverifiable-date: %d", skipped_stale)
     if stopped_early:
         log.warning("This run stopped early due to the time budget — some keywords may not have been processed.")
 
