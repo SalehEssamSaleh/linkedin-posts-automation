@@ -43,8 +43,14 @@ SEARCH_WINDOW_HOURS = 24
 # ---------------------------------------------------------------------------
 MIN_DELAY_SECONDS = 4
 MAX_DELAY_SECONDS = 9
-MAX_RETRIES = 3
-BACKOFF_BASE_SECONDS = 5
+MAX_RETRIES = 2
+BACKOFF_BASE_SECONDS = 4
+
+# Hard internal time budget for the whole run. The GitHub Actions job has a
+# 60-minute timeout (see workflow file); this stops new work at 48 minutes so
+# there's always time left to write whatever was already found to the Sheet,
+# instead of the job getting killed mid-run with nothing saved.
+TIME_BUDGET_SECONDS = 48 * 60
 
 # ---------------------------------------------------------------------------
 # Source B: Google Alerts delivered as RSS
