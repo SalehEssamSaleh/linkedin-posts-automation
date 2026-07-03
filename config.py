@@ -14,7 +14,24 @@ import os
 KEYWORDS = [
     "UX/UI",
     "تجربة المستخدم",
+    "فحص تجربة المستخدم",
+    "رحلة المستخدم",
+    "تصميم تجربة المستخدم",
+    "هيئة الحكومة الرقمية",
+    "معايير هيئة الحكومة الرقمية",
+    "مؤشر نضج التجربة الرقمية",
+    "مؤشر قياس التجربة الرقمية",
+    "UX Research / أبحاث تجربة المستخدم",
+    "Usability Testing / اختبار قابلية الاستخدام",
+    "تصميم واجهة المستخدم",
+    "Human-Centered Design / التصميم المتمحور حول الإنسان",
+    "تصميم الخدمات (Service Design)",
+    "التفكير التصميمي (Design Thinking)",
+    "التحول الرقمي (Digital Transformation)",
+    "تجربة العميل (Customer Experience)",
+    "هندسة المعلومات (Information Architecture)",
 ]
+
 # ---------------------------------------------------------------------------
 # Search window
 # ---------------------------------------------------------------------------
@@ -34,6 +51,12 @@ BACKOFF_BASE_SECONDS = 4
 # there's always time left to write whatever was already found to the Sheet,
 # instead of the job getting killed mid-run with nothing saved.
 TIME_BUDGET_SECONDS = 48 * 60
+
+# If we hit this many HTTP 429s in a row (across different URLs), that's a
+# strong signal the whole connection is currently rate-limited/blocked by
+# LinkedIn — not that individual requests are too close together. Stop
+# fetching for the rest of the run instead of burning the time budget.
+CONSECUTIVE_429_LIMIT = 5
 
 # ---------------------------------------------------------------------------
 # Source B: Google Alerts delivered as RSS
