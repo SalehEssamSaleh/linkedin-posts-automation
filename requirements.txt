@@ -1,0 +1,8 @@
+requests
+gspread
+google-auth
+beautifulsoup4
+ddgs
+google-generativeai
+feedparser
+langdetect
