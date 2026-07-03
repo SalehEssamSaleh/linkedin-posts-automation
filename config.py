@@ -35,7 +35,7 @@ KEYWORDS = [
 # ---------------------------------------------------------------------------
 # Search window
 # ---------------------------------------------------------------------------
-SEARCH_WINDOW_HOURS = 24
+SEARCH_WINDOW_HOURS = 24 * 7  # 7 days — matches the weekly run cadence below
 
 # ---------------------------------------------------------------------------
 # Rate limiting / retry — daily runs across ~18 keywords hit free search
