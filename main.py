@@ -17,6 +17,8 @@ import time
 import random
 import datetime as dt
 
+import requests
+from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
 import google.generativeai as genai
@@ -109,6 +111,59 @@ def parse_relative_date(text):
     return now - delta
 
 
+def parse_iso_date(date_str):
+    """Parse a JSON-LD datePublished string into an aware UTC datetime."""
+    if not date_str:
+        return None
+    cleaned = date_str.strip()
+    if cleaned.endswith("Z"):
+        cleaned = cleaned[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(cleaned)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed
+
+
+def fetch_real_date(url):
+    """Best-effort SINGLE attempt to grab the real JSON-LD datePublished
+    from the LinkedIn page itself — no retries, short timeout. If LinkedIn
+    blocks/rate-limits/times out, we just return None and fall back to the
+    DDG-snippet-based guess instead of hammering it with retries."""
+    try:
+        resp = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=8,
+        )
+    except Exception:
+        return None
+    if resp.status_code != 200:
+        return None
+    soup = BeautifulSoup(resp.text, "html.parser")
+    for script in soup.find_all("script", {"type": "application/ld+json"}):
+        try:
+            data = json.loads(script.string or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if isinstance(item, dict) and item.get("datePublished"):
+                return item["datePublished"]
+    return None
+
+
+def is_within_window(published_dt):
+    """True/False if we can judge it, None if published_dt is unknown."""
+    if published_dt is None:
+        return None
+    now = dt.datetime.now(dt.timezone.utc)
+    age = now - published_dt
+    return dt.timedelta(minutes=-10) <= age <= dt.timedelta(hours=config.SEARCH_WINDOW_HOURS)
+
+
 def detect_language(text):
     try:
         code = detect(text)
@@ -153,10 +208,19 @@ def generate_reply(model, content, language):
 # ---------------------------------------------------------------------------
 def search_keyword(keyword, consecutive_429):
     """Runs one DuckDuckGo search for a keyword. Returns (results, consecutive_429)."""
-    query = f'site:linkedin.com "{keyword}"'
+    # Target post/article paths directly instead of a bare site:linkedin.com
+    # search — a bare search returns mostly profiles/companies/jobs, which is
+    # why most results were getting rejected as not_post_or_article before.
+    # No timelimit here on purpose: DDG's timelimit + site: combo has
+    # historically returned 0 results even when real matches exist — we
+    # filter for recency ourselves afterward using the real/parsed date.
+    query = (
+        f'(site:linkedin.com/posts OR site:linkedin.com/feed/update '
+        f'OR site:linkedin.com/pulse) "{keyword}"'
+    )
     for attempt in range(config.MAX_RETRIES + 1):
         try:
-            results = list(DDGS().text(query, timelimit="w", max_results=15))
+            results = list(DDGS().text(query, max_results=20))
             return results, 0  # success resets the 429 streak
         except Exception as e:
             msg = str(e).lower()
@@ -248,7 +312,7 @@ def run():
 
     new_seen_rows = []
     consecutive_429 = 0
-    stats = {"found": 0, "added": 0, "duplicate": 0, "not_post_or_article": 0}
+    stats = {"found": 0, "added": 0, "duplicate": 0, "not_post_or_article": 0, "too_old": 0}
 
     for keyword in config.KEYWORDS:
         if time_budget_exceeded():
@@ -277,8 +341,33 @@ def run():
                 continue
 
             content = f"{title} - {body}".strip(" -")
-            published = parse_relative_date(body)
-            date_str = published.strftime("%Y-%m-%d") if published else "Not specified"
+
+            # Try once for the real, verified date. If LinkedIn blocks/times
+            # out, fall back to a snippet-based estimate rather than retry.
+            real_date_str = fetch_real_date(url)
+            time.sleep(random.uniform(1, 3))  # small pacing gap per URL fetch
+
+            if real_date_str:
+                published = parse_iso_date(real_date_str)
+                date_source = "verified" if published else "unknown"
+            else:
+                published = parse_relative_date(body)
+                date_source = "estimated" if published else "unknown"
+
+            within = is_within_window(published)
+            if within is False:
+                stats["too_old"] += 1
+                continue
+            # within is True -> keep. within is None (date unknown) -> keep
+            # but mark it clearly as unverified rather than silently guessing.
+
+            if date_source == "verified":
+                date_str = published.strftime("%Y-%m-%d")
+            elif date_source == "estimated":
+                date_str = f"{published.strftime('%Y-%m-%d')} (estimated)"
+            else:
+                date_str = "Unverified"
+
             language = detect_language(content) if content else "Unknown"
             reply = generate_reply(model, content, language)
 
