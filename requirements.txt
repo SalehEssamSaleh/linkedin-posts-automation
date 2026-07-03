@@ -3,3 +3,5 @@ google-auth
 google-generativeai
 ddgs
 langdetect
+requests
+beautifulsoup4
