@@ -224,19 +224,48 @@ def init_gemini():
     raise RuntimeError("No Gemini model supporting generateContent was found.")
 
 
+# Once we detect Gemini's quota is genuinely exhausted (not just a transient
+# per-minute blip), stop calling the API for the rest of this run — retrying
+# a hard quota error wastes time on every remaining row for zero benefit.
+_gemini_quota_exhausted = False
+
+FALLBACK_REPLIES = {
+    "Arabic": "محتوى قيم، شكراً على المشاركة!",
+    "English": "Great insights here — thanks for sharing!",
+}
+
+
 def generate_reply(model, content, language):
+    global _gemini_quota_exhausted
     target_lang = "Arabic" if language == "Arabic" else "English"
+
+    if _gemini_quota_exhausted:
+        return FALLBACK_REPLIES[target_lang]
+
     prompt = (
         "You are a UX/UI professional writing a short, genuine, friendly "
         "LinkedIn comment replying to the post below. Keep it under 40 "
         f"words, and write it in {target_lang}.\n\nPOST:\n{content}"
     )
-    try:
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        print(f"[Gemini] reply generation failed: {e}")
-        return "N/A"
+    last_error = None
+    for attempt in range(1, 4):  # up to 3 tries total
+        try:
+            response = model.generate_content(prompt)
+            return response.text.strip()
+        except Exception as e:
+            last_error = e
+            error_text = str(e).lower()
+            if "exceeded your current quota" in error_text or "quota" in error_text:
+                print(f"[Gemini] Quota exhausted — switching to template replies "
+                      f"for the rest of this run: {e}")
+                _gemini_quota_exhausted = True
+                return FALLBACK_REPLIES[target_lang]
+            wait = 5 * attempt
+            print(f"[Gemini] reply generation failed (attempt {attempt}/3): {e} "
+                  f"— retrying in {wait}s")
+            time.sleep(wait)
+    print(f"[Gemini] giving up after 3 attempts: {last_error}")
+    return FALLBACK_REPLIES[target_lang]
 
 
 # ---------------------------------------------------------------------------
