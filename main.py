@@ -349,7 +349,7 @@ def run():
     new_seen_rows = []
     consecutive_429 = 0
     stats = {"found": 0, "added": 0, "duplicate": 0, "not_post_or_article": 0,
-              "too_old": 0, "unverifiable_date": 0}
+              "too_old": 0, "unverifiable_date": 0, "skipped_cap": 0}
 
     for keyword in config.KEYWORDS:
         if time_budget_exceeded():
@@ -362,8 +362,13 @@ def run():
             break
 
         stats["found"] += len(results)
+        fetches_this_keyword = 0
 
         for r in results:
+            if time_budget_exceeded():
+                print(f"[Run] Time budget reached mid-keyword ('{keyword}'). Stopping.")
+                break
+
             url = r.get("href", "")
             title = r.get("title", "")
             body = r.get("body", "")
@@ -376,6 +381,16 @@ def run():
             if url in seen_urls:
                 stats["duplicate"] += 1
                 continue
+
+            if fetches_this_keyword >= config.MAX_FETCHES_PER_KEYWORD:
+                # Cap reached for this keyword — skip remaining candidates
+                # rather than fetch every single one. This bounds worst-case
+                # run time regardless of how many keywords are configured,
+                # since it's the per-candidate fetch that's expensive, not
+                # the search itself.
+                stats["skipped_cap"] += 1
+                continue
+            fetches_this_keyword += 1
 
             content = f"{title} - {body}".strip(" -")
 
