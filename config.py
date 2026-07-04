@@ -108,8 +108,8 @@ SEARCH_WINDOW_HOURS = 168
 MIN_DELAY_SECONDS = 6
 MAX_DELAY_SECONDS = 13
 MAX_RETRIES = 2
-BACKOFF_BASE_SECONDS = 4
-CONSECUTIVE_429_LIMIT = 5
+BACKOFF_BASE_SECONDS = 15
+CONSECUTIVE_429_LIMIT = 8
 
 # ---------------------------------------------------------------------------
 # Overall time budget for a single run, in minutes.
