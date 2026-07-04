@@ -256,7 +256,7 @@ def search_keyword(keyword, consecutive_429):
     )
     for attempt in range(config.MAX_RETRIES + 1):
         try:
-            results = list(DDGS().text(query, max_results=20))
+            results = list(DDGS().text(query, max_results=35))
             return results, 0  # success resets the 429 streak
         except Exception as e:
             msg = str(e).lower()
