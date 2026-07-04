@@ -5,3 +5,4 @@ ddgs
 langdetect
 requests
 beautifulsoup4
+feedparser
