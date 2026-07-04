@@ -300,20 +300,32 @@ def search_keyword(keyword, consecutive_429):
     for attempt in range(config.MAX_RETRIES + 1):
         try:
             results = list(DDGS().text(query, max_results=35, backend="duckduckgo"))
-            return results, 0  # success resets the 429 streak
+            return results, 0  # success resets the streak
         except Exception as e:
             msg = str(e).lower()
-            if "429" in msg or "ratelimit" in msg or "rate limit" in msg:
+            # "No results found" from ddgs often isn't genuine zero-content —
+            # when it happens on nearly every keyword in a row (including
+            # common terms we know have real recent posts), it's DDG
+            # throttling/blocking this session, just surfaced as a different
+            # message than an explicit 429. Treat it the same way.
+            looks_blocked = (
+                "429" in msg or "ratelimit" in msg or "rate limit" in msg
+                or "no results found" in msg
+            )
+            if looks_blocked:
                 consecutive_429 += 1
                 wait = config.BACKOFF_BASE_SECONDS * (2 ** attempt)
                 print(
-                    f"[Search] 429 on '{keyword}' "
+                    f"[Search] Possible block/throttle on '{keyword}': {e} "
                     f"(attempt {attempt + 1}/{config.MAX_RETRIES + 1}, "
                     f"consecutive={consecutive_429}). Waiting {wait}s."
                 )
                 time.sleep(wait)
                 if consecutive_429 >= config.CONSECUTIVE_429_LIMIT:
-                    print("[Search] Circuit breaker tripped. Stopping search for this run.")
+                    print("[Search] Circuit breaker tripped — DDG is very likely "
+                          "throttling/blocking this run entirely. Stopping search "
+                          "for the rest of this run instead of grinding through "
+                          "every remaining keyword for the same result.")
                     return [], consecutive_429
                 continue
             print(f"[Search] Error on '{keyword}': {e}")
