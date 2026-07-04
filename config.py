@@ -118,6 +118,17 @@ CONSECUTIVE_429_LIMIT = 5
 TIME_BUDGET_MINUTES = 48
 
 # ---------------------------------------------------------------------------
+# Cap on how many candidates per keyword get the expensive real-page-fetch
+# treatment. This is what actually bounds worst-case run time as the
+# keyword list grows — the search itself is cheap, it's fetching each
+# LinkedIn page for its real date that's slow. A keyword rarely has more
+# than a handful of genuinely-recent matches anyway, so this costs very
+# few real results while keeping run time predictable regardless of how
+# many keywords are configured.
+# ---------------------------------------------------------------------------
+MAX_FETCHES_PER_KEYWORD = 10
+
+# ---------------------------------------------------------------------------
 # Google Sheets
 # ---------------------------------------------------------------------------
 SHEET_ID = os.environ.get("SHEET_ID", "")
