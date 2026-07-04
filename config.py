@@ -3,6 +3,7 @@ Configuration for LinkedIn UX/UI Keyword Monitoring Automation.
 """
 
 import os
+import json
 
 # ---------------------------------------------------------------------------
 # Keywords to search for (Arabic + English UX/UI terms)
@@ -138,3 +139,19 @@ GOOGLE_SHEETS_CREDENTIALS = os.environ.get("GOOGLE_SHEETS_CREDENTIALS", "")
 # Gemini
 # ---------------------------------------------------------------------------
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+# ---------------------------------------------------------------------------
+# Google Alerts RSS — a completely independent, non-DDG search source.
+# Google has no API to create Alerts programmatically, so this is a
+# one-time manual setup per keyword (see project notes for the exact
+# steps). Supplied as a single JSON secret so adding/removing keywords
+# doesn't require a code change — just update the secret value.
+# Keywords with no feed configured are simply skipped, not an error.
+# ---------------------------------------------------------------------------
+ALERT_RSS_FEEDS = {}
+_alert_feeds_json = os.environ.get("ALERT_RSS_FEEDS_JSON", "")
+if _alert_feeds_json:
+    try:
+        ALERT_RSS_FEEDS = json.loads(_alert_feeds_json)
+    except json.JSONDecodeError:
+        ALERT_RSS_FEEDS = {}  # malformed secret — fail soft, source is skipped
