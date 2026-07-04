@@ -330,6 +330,8 @@ def search_google_alerts(keyword):
 
     if results:
         print(f"[Alerts] Found {len(results)} entries for '{keyword}'")
+    else:
+        print(f"[Alerts] Checked feed for '{keyword}' — 0 entries currently.")
     return results
 
 
