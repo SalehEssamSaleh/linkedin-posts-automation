@@ -16,9 +16,11 @@ import json
 import time
 import random
 import datetime as dt
+from urllib.parse import urlparse, parse_qs, unquote
 
 import requests
 from bs4 import BeautifulSoup
+import feedparser
 import gspread
 from google.oauth2.service_account import Credentials
 import google.generativeai as genai
@@ -285,6 +287,52 @@ def generate_reply(model, content, language):
 # ---------------------------------------------------------------------------
 # Search
 # ---------------------------------------------------------------------------
+def _unwrap_google_alert_link(link):
+    """Google Alerts RSS entries wrap the real target URL inside a
+    google.com/url?...&url=<real target>&... redirect link. Unwrap it so we
+    get the actual LinkedIn URL, not a Google redirect."""
+    try:
+        parsed = urlparse(link)
+        qs = parse_qs(parsed.query)
+        if "url" in qs:
+            return unquote(qs["url"][0])
+    except Exception:
+        pass
+    return link
+
+
+def search_google_alerts(keyword):
+    """Pulls entries from a manually-configured Google Alerts RSS feed for
+    this keyword, in the same {href, title, body} shape as DDG results so
+    the rest of the pipeline doesn't need to know or care which source a
+    result came from. Returns [] (not an error) if no feed is configured
+    for this keyword, or if the feed is currently empty/unreachable."""
+    feed_url = config.ALERT_RSS_FEEDS.get(keyword)
+    if not feed_url:
+        return []
+
+    try:
+        parsed = feedparser.parse(feed_url)
+    except Exception as e:
+        print(f"[Alerts] Could not read feed for '{keyword}': {e}")
+        return []
+
+    results = []
+    for entry in getattr(parsed, "entries", []):
+        real_url = _unwrap_google_alert_link(entry.get("link", ""))
+        if not real_url:
+            continue
+        results.append({
+            "href": real_url,
+            "title": entry.get("title", ""),
+            "body": entry.get("summary", ""),
+        })
+
+    if results:
+        print(f"[Alerts] Found {len(results)} entries for '{keyword}'")
+    return results
+
+
 def search_keyword(keyword, consecutive_429):
     """Runs one DuckDuckGo search for a keyword. Returns (results, consecutive_429)."""
     # Target post/article paths directly instead of a bare site:linkedin.com
@@ -403,6 +451,10 @@ def run():
 
     new_seen_rows = []
     consecutive_429 = 0
+    ddg_disabled = False  # once DDG's circuit breaker trips, stop calling it
+                           # for the rest of this run, but keep using Google
+                           # Alerts for remaining keywords — it's a fully
+                           # independent source and shouldn't go down with DDG.
     stats = {"found": 0, "added": 0, "duplicate": 0, "not_post_or_article": 0,
               "too_old": 0, "unverifiable_date": 0, "skipped_cap": 0}
 
@@ -412,9 +464,17 @@ def run():
             break
 
         print(f"[Search] Keyword: {keyword}")
-        results, consecutive_429 = search_keyword(keyword, consecutive_429)
-        if consecutive_429 >= config.CONSECUTIVE_429_LIMIT:
-            break
+        results = []
+        if not ddg_disabled:
+            ddg_results, consecutive_429 = search_keyword(keyword, consecutive_429)
+            results += ddg_results
+            if consecutive_429 >= config.CONSECUTIVE_429_LIMIT:
+                print("[Search] DDG disabled for the rest of this run due to "
+                      "repeated blocking — still trying Google Alerts for "
+                      "remaining keywords.")
+                ddg_disabled = True
+
+        results += search_google_alerts(keyword)
 
         stats["found"] += len(results)
         fetches_this_keyword = 0
