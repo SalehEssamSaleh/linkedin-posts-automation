@@ -217,11 +217,24 @@ def detect_language(text):
 # ---------------------------------------------------------------------------
 def init_gemini():
     genai.configure(api_key=config.GEMINI_API_KEY)
-    for m in genai.list_models():
-        if "generateContent" in m.supported_generation_methods:
-            print(f"[Gemini] Using model: {m.name}")
-            return genai.GenerativeModel(m.name)
-    raise RuntimeError("No Gemini model supporting generateContent was found.")
+    models = [m for m in genai.list_models() if "generateContent" in m.supported_generation_methods]
+    if not models:
+        raise RuntimeError("No Gemini model supporting generateContent was found.")
+    # Prefer lighter models first — "flash-lite" / "flash" variants generally
+    # carry more generous free-tier quotas than "pro" models.
+    preference_order = ["flash-lite", "flash", "pro"]
+
+    def rank(m):
+        name = m.name.lower()
+        for i, key in enumerate(preference_order):
+            if key in name:
+                return i
+        return len(preference_order)
+
+    models.sort(key=rank)
+    chosen = models[0]
+    print(f"[Gemini] Using model: {chosen.name}")
+    return genai.GenerativeModel(chosen.name)
 
 
 # Once we detect Gemini's quota is genuinely exhausted (not just a transient
@@ -250,6 +263,7 @@ def generate_reply(model, content, language):
     last_error = None
     for attempt in range(1, 4):  # up to 3 tries total
         try:
+            time.sleep(random.uniform(3, 5))  # pace calls to respect per-minute limits
             response = model.generate_content(prompt)
             return response.text.strip()
         except Exception as e:
@@ -285,7 +299,7 @@ def search_keyword(keyword, consecutive_429):
     )
     for attempt in range(config.MAX_RETRIES + 1):
         try:
-            results = list(DDGS().text(query, max_results=35))
+            results = list(DDGS().text(query, max_results=35, backend="duckduckgo"))
             return results, 0  # success resets the 429 streak
         except Exception as e:
             msg = str(e).lower()
